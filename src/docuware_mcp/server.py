@@ -13,7 +13,6 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Iterable,
     List,
     Optional,
     ParamSpec,
@@ -152,15 +151,6 @@ def _fields_to_dict(
             value = value.isoformat()
         out[name] = value
     return out
-
-
-def _extract_doc_id(field_values: Iterable[Any]) -> Optional[str]:
-    """Pull the DWDOCID value out of a FieldValue list as a string."""
-    for fv in field_values or []:
-        if getattr(fv, "id", None) == "DWDOCID":
-            value = getattr(fv, "value", None)
-            return str(value) if value is not None else None
-    return None
 
 
 # --- argument coercion ---
@@ -369,7 +359,7 @@ def search(
             break
         items.append(
             {
-                "id": _extract_doc_id(item.fields),
+                "id": str(item.id),
                 "title": item.title,
                 "content_type": item.content_type,
                 "fields": _fields_to_dict(item.fields, allowed_ids=allowed_ids),
@@ -427,6 +417,7 @@ def get_document_text(
     archive: str,
     document_id: str,
     attachment_id: Optional[str] = None,
+    max_chars: int = 50_000,
 ) -> Dict[str, Any]:
     """Fetch the OCR fulltext of a document.
 
@@ -441,12 +432,18 @@ def get_document_text(
         document_id: DocuWare document ID (DWDOCID).
         attachment_id: If given, return text only for this attachment.
             See :func:`get_document` for the attachment list.
+        max_chars: Total character budget across all returned attachments
+            (default 50000). Text beyond it is cut and the attachment is
+            marked ``truncated: true``; ``char_count`` is always the full length.
 
     Returns:
         Dict with ``document_id`` and ``attachments`` (list of
-        ``{attachment_id, filename, content_type, pages, char_count, text}``;
+        ``{attachment_id, filename, content_type, pages, char_count, truncated, text}``;
         ``error`` is set instead of ``text`` when OCR is unavailable).
     """
+    if max_chars < 1:
+        raise ValueError("max_chars must be >= 1")
+
     client = _get_client()
     fc = _resolve_archive(client, archive)
     doc = fc.get_document(document_id)
@@ -460,6 +457,7 @@ def get_document_text(
             )
 
     results: List[Dict[str, Any]] = []
+    remaining = max_chars
     for att in attachments:
         entry = _attachment_summary(att)
         try:
@@ -469,8 +467,10 @@ def get_document_text(
             entry["char_count"] = 0
             entry["error"] = str(exc)
         else:
-            entry["text"] = text
+            entry["text"] = text[:remaining]
             entry["char_count"] = len(text)
+            entry["truncated"] = len(text) > remaining
+            remaining -= len(entry["text"])
         results.append(entry)
 
     log.info(

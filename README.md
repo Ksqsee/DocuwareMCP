@@ -8,6 +8,11 @@
 > documents. Tools: `status`, `list_archives`, `describe_archive`, `search`,
 > `get_document`, `get_document_text`.
 >
+> Local changes vs. upstream: `search` returns the document ID from the result
+> item itself (not the `DWDOCID` field, which may be absent), and
+> `get_document_text` takes `max_chars` (default 50000) and marks cut text
+> with `truncated: true`.
+>
 > To run this copy instead of the PyPI package, point your MCP client at the
 > checkout: `uv run --directory /path/to/DocuwareMCP docuware-mcp`
 > (see `.mcp.json.example`). Alternatively use the published package with
