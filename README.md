@@ -13,6 +13,10 @@
 > `get_document_text` takes `max_chars` (default 50000) and marks cut text
 > with `truncated: true`.
 >
+> **Hosted for colleagues:** setting `DW_MCP_PUBLIC_URL` turns on an OAuth login
+> where each person enters a personal access code (`docuware-mcp user add NAME`).
+> Docker/Caddy setup and a Hostinger walkthrough: [DEPLOY.md](DEPLOY.md).
+>
 > To run this copy instead of the PyPI package, point your MCP client at the
 > checkout: `uv run --directory /path/to/DocuwareMCP docuware-mcp`
 > (see `.mcp.json.example`). Alternatively use the published package with

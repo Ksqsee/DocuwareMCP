@@ -7,6 +7,7 @@ import functools
 import json
 import logging
 import os
+import sys
 import time
 from typing import (
     Annotated,
@@ -210,7 +211,17 @@ def _surface_tool_errors(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
-server = MCPServer("docuware-mcp", version=__version__)
+def _make_server(**kwargs: Any) -> MCPServer:
+    return MCPServer("docuware-mcp", version=__version__, **kwargs)
+
+
+# A public URL means we are hosted for others: require the access-code OAuth login.
+if os.environ.get("DW_MCP_PUBLIC_URL"):
+    from docuware_mcp.auth import setup
+
+    server = setup(_make_server)
+else:
+    server = _make_server()
 
 
 @server.tool()
@@ -553,7 +564,17 @@ def main() -> None:
     Default transport is stdio (for Claude Desktop / Claude Code). Pass ``--http``
     to serve Streamable HTTP for browser-based clients like Open WebUI.
     """
+    if sys.argv[1:2] == ["user"]:
+        from docuware_mcp.auth import user_command
+
+        sys.exit(user_command(sys.argv[2:]))
     args = _build_arg_parser().parse_args()
+    if (
+        args.http
+        and args.host not in ("127.0.0.1", "localhost", "::1")
+        and not os.environ.get("DW_MCP_PUBLIC_URL")
+    ):
+        sys.exit("Refusing to serve beyond localhost without login: set DW_MCP_PUBLIC_URL.")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
