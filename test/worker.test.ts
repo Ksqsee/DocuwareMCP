@@ -8,11 +8,18 @@ let dw: FakeState;
 
 beforeEach(() => {
   dw = newState();
+  // A fresh username per test: the per-username login limit would otherwise carry over.
+  GOOD.username = `anna+${crypto.randomUUID()}`;
   vi.spyOn(globalThis, "fetch").mockImplementation(fakeDocuWare(dw));
 });
 afterEach(() => vi.restoreAllMocks());
 
-const call = (path: string, init?: RequestInit) => (exports as any).default.fetch(new Request(`${ORIGIN}${path}`, init));
+// Cloudflare always sets CF-Connecting-IP; give each request its own unless a test picks one.
+const call = (path: string, init?: RequestInit): Promise<Response> => {
+  const req = new Request(`${ORIGIN}${path}`, init);
+  if (!req.headers.has("CF-Connecting-IP")) req.headers.set("CF-Connecting-IP", crypto.randomUUID());
+  return (exports as any).default.fetch(req);
+};
 
 async function register(redirect = CALLBACK) {
   return call("/register", {

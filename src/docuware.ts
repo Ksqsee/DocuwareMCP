@@ -9,6 +9,8 @@ export class DocuWareError extends Error {
   constructor(
     message: string,
     readonly status = 0,
+    /** DocuWare rejected the username/password itself (not just an expired token). */
+    readonly badCredentials = false,
   ) {
     super(message);
   }
@@ -38,9 +40,14 @@ export async function login(base: string, creds: Creds): Promise<{ token: string
   const info = await getJson(`${base}/DocuWare/Platform/Home/IdentityServiceInfo`);
   const identity = String(pick(info, "IdentityServiceUrl") ?? "").replace(/\/$/, "");
   const oidc = await getJson(`${identity}/.well-known/openid-configuration`);
-  const tokenUrl = pick(oidc, "token_endpoint") ?? `${base}/DocuWare/Identity/connect/token`;
+  const tokenUrl = new URL(pick(oidc, "token_endpoint") ?? `${base}/DocuWare/Identity/connect/token`);
+  // The password may only go to DocuWare itself: its own host or DocuWare Cloud's login hosts.
+  const host = tokenUrl.hostname;
+  if (tokenUrl.protocol !== "https:" || (host !== new URL(base).hostname && !host.endsWith(".docuware.cloud")))
+    throw new DocuWareError(`Unerwarteter Anmeldeserver: ${tokenUrl.origin}`);
   const resp = await fetch(tokenUrl, {
     method: "POST",
+    redirect: "manual", // following a redirect would re-send the password elsewhere
     headers: JSON_HEADERS,
     body: new URLSearchParams({
       grant_type: "password",
@@ -50,7 +57,8 @@ export async function login(base: string, creds: Creds): Promise<{ token: string
       scope: "docuware.platform",
     }),
   });
-  if (resp.status === 400 || resp.status === 401) throw new DocuWareError("Benutzername oder Passwort falsch.", 401);
+  if (resp.status >= 300 && resp.status < 400) throw new DocuWareError("DocuWare-Anmeldung wurde umgeleitet; abgebrochen.", resp.status);
+  if (resp.status === 400 || resp.status === 401) throw new DocuWareError("Benutzername oder Passwort falsch.", 401, true);
   if (!resp.ok) throw new DocuWareError(`DocuWare-Anmeldung fehlgeschlagen (HTTP ${resp.status}).`, resp.status);
   const body = (await resp.json()) as Json;
   if (!body.access_token) throw new DocuWareError("DocuWare hat kein Token geliefert.");
@@ -85,7 +93,7 @@ export class DocuWare {
       });
     if (!this.token) this.token = (await login(this.base, this.creds)).token;
     let resp = await send();
-    if (resp.status === 401 || resp.status === 403) {
+    if (resp.status === 401) {
       this.token = (await login(this.base, this.creds)).token;
       resp = await send();
     }

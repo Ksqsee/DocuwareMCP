@@ -12,5 +12,9 @@
     "PUBLIC_URL": "https://docuware-mcp.ksqsebastian.workers.dev"
   },
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "10235420c52245e991751da77e20ea1d" }],
-  "ratelimits": [{ "name": "LOGIN_LIMIT", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }]
+  "ratelimits": [
+    { "name": "LOGIN_LIMIT", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
+    { "name": "USER_LIMIT", "namespace_id": "1002", "simple": { "limit": 5, "period": 60 } },
+    { "name": "REGISTER_LIMIT", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } }
+  ]
 }

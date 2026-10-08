@@ -26,7 +26,8 @@ const OPERATORS: Record<string, string[]> = {
 };
 
 export function operatorsFor(type: string | null): string[] {
-  return OPERATORS[(type ?? "").toLowerCase()] ?? ["eq", "empty"];
+  const key = (type ?? "").toLowerCase();
+  return Object.hasOwn(OPERATORS, key) ? OPERATORS[key] : ["eq", "empty"];
 }
 
 export class FilterError extends Error {}
@@ -44,8 +45,9 @@ export function escape(value: string, wildcards: boolean): string {
   let out = "";
   for (let i = 0; i < value.length; i++) {
     const c = value[i];
-    if (c === "\\" && i + 1 < value.length && "()*?".includes(value[i + 1])) {
-      out += c + value[++i];
+    if (c === "\\") {
+      // An escape we recognise stays as it is (idempotent); any other backslash is made literal.
+      out += i + 1 < value.length && "()*?\\".includes(value[i + 1]) ? c + value[++i] : "\\\\";
       continue;
     }
     out += (chars.includes(c) ? "\\" : "") + c;
@@ -122,7 +124,8 @@ const DIRECTIONS: Record<string, string> = { asc: "Asc", desc: "Desc", default: 
 
 export function buildSortOrder(orderBy: { field: string; direction?: string }[], fields: Field[]) {
   return orderBy.map(({ field, direction }) => {
-    const dir = DIRECTIONS[(direction ?? "asc").toLowerCase()];
+    const key = (direction ?? "asc").toLowerCase();
+    const dir = Object.hasOwn(DIRECTIONS, key) ? DIRECTIONS[key] : undefined;
     if (!dir) throw new FilterError(`direction must be asc, desc or default, got ${JSON.stringify(direction)}`);
     return { Field: findField(fields, field).id, Direction: dir };
   });

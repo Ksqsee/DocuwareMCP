@@ -10,7 +10,12 @@ export interface Env {
   DW_URL: string;
   PUBLIC_URL: string;
   LOGIN_LIMIT: RateLimit;
+  USER_LIMIT: RateLimit;
+  REGISTER_LIMIT: RateLimit;
 }
+
+const FAILS_BEFORE_BLOCK = 5;
+const BLOCK_SECONDS = 15 * 60;
 
 // Only Claude may receive sign-ins, so nobody can register a look-alike app
 // and use this login page to phish a colleague's DocuWare password.
@@ -70,15 +75,24 @@ async function authorize(request: Request, env: Env): Promise<Response> {
     return html(page(consent.handle, new URL(auth.redirectUri).host), consent.headers);
   }
 
-  // Each try costs a DocuWare login, and DocuWare locks accounts after repeated failures.
+  // Each try costs a DocuWare login, and DocuWare locks accounts after repeated failures:
+  // limit per IP, per username, and block a username for 15 minutes after 5 failures.
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  if (!(await env.LOGIN_LIMIT.limit({ key: ip })).success)
-    return new Response("Zu viele Anmeldeversuche. Bitte eine Minute warten.", { status: 429 });
+  const tooMany = () => new Response("Zu viele Anmeldeversuche. Bitte später erneut versuchen.", { status: 429 });
+  if (!(await env.LOGIN_LIMIT.limit({ key: ip })).success) return tooMany();
+  // Only a browser that opened the login page carries the consent cookie; without it,
+  // never touch DocuWare (otherwise this form is an open password checker).
+  if (!(request.headers.get("Cookie") ?? "").includes("__Host-oauth-"))
+    return new Response("Die Anmeldung ist abgelaufen. Bitte in Claude erneut auf Verbinden klicken.", { status: 400 });
 
   const form = await request.formData();
   const handle = String(form.get("handle") ?? "");
   const username = String(form.get("username") ?? "").trim();
   const password = String(form.get("password") ?? "");
+  const failKey = `login-fails:${username.toLowerCase()}`;
+  if (!(await env.USER_LIMIT.limit({ key: username.toLowerCase() })).success) return tooMany();
+  const fails = Number(await env.OAUTH_KV.get(failKey)) || 0;
+  if (fails >= FAILS_BEFORE_BLOCK) return tooMany();
   try {
     // Check the password against DocuWare before using up the one-time consent handle.
     const { token } = await login(base(env), { username, password });
@@ -90,6 +104,7 @@ async function authorize(request: Request, env: Env): Promise<Response> {
       scope: approved.request.scope,
       props: { username, password, dwToken: token } satisfies Props,
     });
+    if (fails) await env.OAUTH_KV.delete(failKey);
     console.log(`login ok: ${username}`);
     approved.headers.set("Location", redirectTo);
     return new Response(null, { status: 302, headers: approved.headers });
@@ -98,6 +113,7 @@ async function authorize(request: Request, env: Env): Promise<Response> {
       console.error(e);
       return new Response("Die Anmeldung ist abgelaufen. Bitte in Claude erneut auf Verbinden klicken.", { status: 400 });
     }
+    if (e.badCredentials) await env.OAUTH_KV.put(failKey, String(fails + 1), { expirationTtl: BLOCK_SECONDS });
     await new Promise((r) => setTimeout(r, 1000)); // slows password guessing
     const headers = new Headers({ "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'", "Cache-Control": "no-store" });
     return html(page(handle, "claude.ai", e.message, username), headers, 401);
@@ -106,11 +122,11 @@ async function authorize(request: Request, env: Env): Promise<Response> {
 
 const mcp = {
   fetch(request: Request, env: Env, ctx: ExecutionContext & { props: Props }) {
-    return createMcpHandler(() => buildServer(base(env), ctx.props))(request, env, ctx);
+    return createMcpHandler(() => buildServer(base(env), ctx.props, env.OAUTH_KV))(request, env, ctx);
   },
 };
 
-export default new OAuthProvider<Env>({
+const provider = new OAuthProvider<Env>({
   apiRoute: "/mcp",
   apiHandler: mcp as any,
   defaultHandler: {
@@ -145,3 +161,15 @@ export default new OAuthProvider<Env>({
     return { accessTokenProps: { ...p, dwToken: token }, newProps: { ...p, dwToken: undefined }, accessTokenTTL: Math.min(expiresIn, 3600) };
   },
 });
+
+// Anonymous endpoints that write to KV (client registration, opening the login page)
+// get a per-IP limit, so nobody can fill storage or burn the daily KV write quota.
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    const writes = (pathname === "/register" && request.method === "POST") || (pathname === "/authorize" && request.method === "GET");
+    if (writes && !(await env.REGISTER_LIMIT.limit({ key: request.headers.get("CF-Connecting-IP") ?? "unknown" })).success)
+      return new Response("Too many requests", { status: 429 });
+    return provider.fetch(request, env, ctx);
+  },
+};

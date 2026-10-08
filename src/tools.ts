@@ -83,19 +83,35 @@ function attachmentSummary(s: Record<string, any>) {
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 1) }] });
 
-// Errors the caller can fix go back as text; anything else stays generic.
-async function run(fn: () => Promise<unknown>) {
-  try {
-    return ok(await fn());
-  } catch (e) {
-    const msg = e instanceof FilterError || e instanceof DocuWareError ? e.message : "Internal error";
-    if (!(e instanceof FilterError)) console.error(e);
-    return { isError: true, content: [{ type: "text" as const, text: msg }] };
-  }
+const RECONNECT = "DocuWare hat das gespeicherte Passwort abgelehnt (geändert?). Bitte in Claude den DocuWare-Connector trennen und neu verbinden.";
+
+async function sha256(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function buildServer(base: string, props: Props): McpServer {
+export function buildServer(base: string, props: Props, kv: KVNamespace): McpServer {
   const dw = new DocuWare(base, props, props.dwToken);
+  // Once DocuWare rejects the stored password, stop trying it: every retry counts
+  // towards DocuWare's account lockout.
+  const rejectedKey = sha256(`${props.username}\n${props.password}`).then((h) => `pw-rejected:${h}`);
+
+  // Errors the caller can fix go back as text; anything else stays generic.
+  async function run(fn: () => Promise<unknown>) {
+    try {
+      if (await kv.get(await rejectedKey)) throw new DocuWareError(RECONNECT, 401, true);
+      return ok(await fn());
+    } catch (e) {
+      if (e instanceof DocuWareError && e.badCredentials) {
+        await kv.put(await rejectedKey, "1", { expirationTtl: 3600 });
+        return { isError: true, content: [{ type: "text" as const, text: RECONNECT }] };
+      }
+      const msg = e instanceof FilterError || e instanceof DocuWareError ? e.message : "Internal error";
+      // Status only: DocuWare error bodies can contain document data.
+      if (!(e instanceof FilterError)) console.error("tool error", e instanceof DocuWareError ? e.status : e);
+      return { isError: true, content: [{ type: "text" as const, text: msg }] };
+    }
+  }
   const server = new McpServer({ name: "docuware", version: "1.0.0" });
   const readOnly = { readOnlyHint: true, openWorldHint: false };
 
