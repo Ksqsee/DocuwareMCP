@@ -8,4 +8,6 @@ export default defineConfig({
       miniflare: { bindings: { DW_URL: "https://dw.test", PUBLIC_URL: "https://docuware-mcp.test" } },
     }),
   ],
+  // The first test in a file also pays for starting workerd.
+  test: { testTimeout: 20_000 },
 });

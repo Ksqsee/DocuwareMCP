@@ -2,7 +2,7 @@ import OAuthProvider, { type AuthRequest, type OAuthHelpers, OAuthError } from "
 import { createMcpHandler } from "agents/mcp/server";
 import { env as globalEnv } from "cloudflare:workers";
 import { DocuWareError, login } from "./docuware";
-import { buildServer, type Props } from "./tools";
+import { buildServer, type Props, sha256 } from "./tools";
 
 export interface Env {
   OAUTH_KV: KVNamespace;
@@ -14,6 +14,8 @@ export interface Env {
   REGISTER_LIMIT: RateLimit;
 }
 
+const DAY = 86_400;
+const MAX_SIGNIN_AGE_MS = 30 * DAY * 1000;
 const FAILS_BEFORE_BLOCK = 5;
 const BLOCK_SECONDS = 15 * 60;
 
@@ -53,6 +55,7 @@ ${error ? `<p class="err" role="alert">${esc(error)}</p>` : ""}
 <input id="p" name="password" type="password" autocomplete="current-password" required>
 <button type="submit">Anmelden</button>
 <p style="margin:1rem 0 0;font-size:.8rem">Zugriff geht an: ${esc(redirectHost)}</p>
+<p style="margin:.5rem 0 0;font-size:.8rem"><strong>Nur anmelden, wenn Sie gerade selbst in Claude bei „DocuWare“ auf „Verbinden“ geklickt haben.</strong> Hat Ihnen jemand diesen Link geschickt, brechen Sie ab.</p>
 </form></body></html>`;
 }
 
@@ -89,7 +92,9 @@ async function authorize(request: Request, env: Env): Promise<Response> {
   const handle = String(form.get("handle") ?? "");
   const username = String(form.get("username") ?? "").trim();
   const password = String(form.get("password") ?? "");
-  const failKey = `login-fails:${username.toLowerCase()}`;
+  // Storage keys use a hash, so nobody with access to the Cloudflare storage can read usernames.
+  const userHash = await sha256(username.toLowerCase());
+  const failKey = `login-fails:${userHash}`;
   if (!(await env.USER_LIMIT.limit({ key: username.toLowerCase() })).success) return tooMany();
   const fails = Number(await env.OAUTH_KV.get(failKey)) || 0;
   if (fails >= FAILS_BEFORE_BLOCK) return tooMany();
@@ -99,10 +104,10 @@ async function authorize(request: Request, env: Env): Promise<Response> {
     const approved = await oauth.approveConsent(request, handle);
     const { redirectTo } = await oauth.completeAuthorization({
       request: approved.request,
-      userId: username.toLowerCase(),
-      metadata: { username },
+      userId: userHash,
+      metadata: {},
       scope: approved.request.scope,
-      props: { username, password, dwToken: token } satisfies Props,
+      props: { username, password, dwToken: token, since: Date.now() } satisfies Props,
     });
     if (fails) await env.OAUTH_KV.delete(failKey);
     console.log(`login ok: ${username}`);
@@ -138,6 +143,7 @@ const provider = new OAuthProvider<Env>({
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
+  refreshTokenIdleTTL: 7 * DAY,
   resourceMetadata: { resource: `${(globalEnv as unknown as Env).PUBLIC_URL.replace(/\/+$/, "")}/mcp` },
   clientRegistrationCallback: ({ clientMetadata }) => {
     const uris = (clientMetadata.redirect_uris as unknown[]) ?? [];
@@ -149,6 +155,9 @@ const provider = new OAuthProvider<Env>({
   tokenExchangeCallback: async ({ grantType, props, env }) => {
     if (grantType !== "refresh_token") return;
     const p = props as Props;
+    // A sign-in ends 7 days after its last use (refreshTokenIdleTTL) and 30 days after login at the latest.
+    if (!p.since || Date.now() - p.since > MAX_SIGNIN_AGE_MS)
+      throw new OAuthError("invalid_grant", { description: "Sign-in older than 30 days" });
     let fresh;
     try {
       fresh = await login(base(env as Env), p);

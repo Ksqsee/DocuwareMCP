@@ -34,6 +34,11 @@ Someone leaves: disable them in DocuWare. Their Claude access ends within the ho
 - The password is only ever sent to the DocuWare host or `*.docuware.cloud`, over https,
   without following redirects. The DocuWare token never leaves the DocuWare host.
 - Document ids must be numeric; filter values are escaped; error bodies are not logged.
+- A sign-in ends after 7 days without use and 30 days after login at the latest (the stored
+  password goes with it). Usernames are stored only as hashes. The login page warns users
+  not to sign in from a link someone sent them.
+- Each tool caps its DocuWare requests (result pages, attachments, value lists) to stay within
+  Cloudflare's per-request limits.
 
 `test/sec-review.test.ts` contains the adversarial security tests; `test/worker.test.ts`
 covers the sign-in flow and tools. Both run inside workerd against a fake DocuWare:

@@ -5,10 +5,14 @@ import { buildConditions, buildSortOrder, type Field, FilterError, operatorsFor 
 
 export interface Props extends Creds {
   dwToken?: string;
+  /** When the user signed in (ms); a sign-in ends 30 days later at the latest. */
+  since?: number;
 }
 
-// Each keyword field's value list costs one request; Workers cap requests per call.
-const MAX_SELECT_LISTS = 15;
+// Workers cap outgoing requests per call (50 on the free plan), so each tool bounds its own.
+const MAX_SELECT_LISTS = 15; // one request per keyword field's value list
+const MAX_RESULT_PAGES = 10; // search: result pages followed
+const MAX_SECTIONS = 20; // get_document_text: attachments read
 
 // Some clients send nested arguments as JSON strings; accept both.
 const jsonArg = <T extends z.ZodType>(schema: T) =>
@@ -85,7 +89,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
 
 const RECONNECT = "DocuWare hat das gespeicherte Passwort abgelehnt (geändert?). Bitte in Claude den DocuWare-Connector trennen und neu verbinden.";
 
-async function sha256(text: string): Promise<string> {
+export async function sha256(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
@@ -171,6 +175,7 @@ order_by: [{"field": "...", "direction": "asc|desc"}]. Omit filters to list ever
         const count = pick(pick(page, "Count"), "Value") ?? null;
         const items: unknown[] = [];
         let skipped = 0;
+        let pages = 0;
         while (items.length < limit) {
           for (const it of pick(page, "Items") ?? []) {
             if (skipped < offset) {
@@ -186,7 +191,7 @@ order_by: [{"field": "...", "direction": "asc|desc"}]. Omit filters to list ever
             });
           }
           const next = links(page).next;
-          if (!next || items.length >= limit) break;
+          if (!next || items.length >= limit || ++pages >= MAX_RESULT_PAGES) break;
           page = await dw.get(next);
         }
         return { items, count, limit, offset };
@@ -236,9 +241,9 @@ order_by: [{"field": "...", "direction": "asc|desc"}]. Omit filters to list ever
         }
         let remaining = max_chars;
         const attachments = [];
-        for (const s of sections) {
+        for (const [i, s] of sections.entries()) {
           const entry: Record<string, unknown> = attachmentSummary(s);
-          if (remaining <= 0) {
+          if (remaining <= 0 || i >= MAX_SECTIONS) {
             entry.text = "";
             entry.truncated = true;
           } else {

@@ -299,6 +299,8 @@ describe("login page", () => {
         const v = (await kv.get(k.name)) ?? "";
         expect(v, k.name).not.toContain(GOOD.password);
         expect(v, k.name).not.toContain("dw-token");
+        // Usernames are hashed: not in key names, values or key metadata.
+        expect(`${k.name} ${v} ${JSON.stringify(k.metadata ?? null)}`, k.name).not.toContain(GOOD.username);
       }
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
@@ -405,5 +407,23 @@ describe("abuse", () => {
   it("CORS on /mcp reflects Origin but never allows credentials", async () => {
     const r = await call("/mcp", { method: "OPTIONS", headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" } });
     expect(r.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
+});
+
+describe("sign-in lifetime and phishing warning", () => {
+  it("login page warns not to sign in from a link someone sent", async () => {
+    const { html } = await openLogin();
+    expect(html).toContain("Hat Ihnen jemand diesen Link geschickt");
+  });
+
+  it("a sign-in older than 30 days cannot be refreshed, even while in use", async () => {
+    const { refresh_token, client_id } = await signIn();
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 31 * 86_400_000 });
+    try {
+      const r = await tokenReq({ grant_type: "refresh_token", refresh_token, client_id });
+      expect(r.status).toBe(400);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
