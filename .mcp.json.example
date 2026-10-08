@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "docuware": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/DocuwareMCP", "docuware-mcp"],
+      "env": {
+        "DW_CREDENTIALS_FILE": "/path/to/credentials.json"
+      }
+    }
+  }
+}
