@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "docuware-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    // Your DocuWare Cloud address.
+    "DW_URL": "https://CHANGE-ME.docuware.cloud",
+    // Where this Worker is reachable (workers.dev or your own domain), without /mcp.
+    "PUBLIC_URL": "https://docuware-mcp.ksqsebastian.workers.dev"
+  },
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "10235420c52245e991751da77e20ea1d" }],
+  "ratelimits": [{ "name": "LOGIN_LIMIT", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }]
+}

@@ -1,0 +1,147 @@
+import OAuthProvider, { type AuthRequest, type OAuthHelpers, OAuthError } from "@cloudflare/workers-oauth-provider";
+import { createMcpHandler } from "agents/mcp/server";
+import { env as globalEnv } from "cloudflare:workers";
+import { DocuWareError, login } from "./docuware";
+import { buildServer, type Props } from "./tools";
+
+export interface Env {
+  OAUTH_KV: KVNamespace;
+  OAUTH_PROVIDER: OAuthHelpers;
+  DW_URL: string;
+  PUBLIC_URL: string;
+  LOGIN_LIMIT: RateLimit;
+}
+
+// Only Claude may receive sign-ins, so nobody can register a look-alike app
+// and use this login page to phish a colleague's DocuWare password.
+export const ALLOWED_REDIRECTS = new Set([
+  "https://claude.ai/api/mcp/auth_callback",
+  "https://claude.com/api/mcp/auth_callback",
+]);
+
+const base = (env: Env) => env.DW_URL.replace(/\/+$/, "");
+
+const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+function page(handle: string, redirectHost: string, error = "", username = ""): string {
+  return `<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocuWare für Claude – Anmelden</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#f4f4f5;margin:0;display:grid;place-items:center;min-height:100vh}
+form{background:#fff;padding:2rem;border-radius:12px;max-width:22rem;width:calc(100% - 2rem);box-shadow:0 1px 4px #0002}
+h1{font-size:1.25rem;margin:0 0 .5rem}p{color:#52525b;margin:0 0 1rem;font-size:.9rem}
+label{display:block;margin-bottom:.35rem;font-weight:600}
+input{width:100%;box-sizing:border-box;padding:.6rem;font-size:1rem;margin-bottom:1rem;border:1px solid #a1a1aa;border-radius:6px}
+button{width:100%;padding:.7rem;font-size:1rem;background:#1d4ed8;color:#fff;border:0;border-radius:8px;cursor:pointer}
+.err{color:#b91c1c;font-weight:600}
+</style></head><body>
+<form method="post">
+<h1>DocuWare für Claude</h1>
+<p>Melden Sie sich mit Ihrem normalen DocuWare-Benutzer an. Claude kann danach Ihre Dokumente lesen, aber nichts ändern oder löschen.</p>
+${error ? `<p class="err" role="alert">${esc(error)}</p>` : ""}
+<input type="hidden" name="handle" value="${esc(handle)}">
+<label for="u">DocuWare-Benutzername</label>
+<input id="u" name="username" autocomplete="username" required autofocus value="${esc(username)}">
+<label for="p">Passwort</label>
+<input id="p" name="password" type="password" autocomplete="current-password" required>
+<button type="submit">Anmelden</button>
+<p style="margin:1rem 0 0;font-size:.8rem">Zugriff geht an: ${esc(redirectHost)}</p>
+</form></body></html>`;
+}
+
+const html = (body: string, headers: Headers, status = 200) => {
+  headers.set("Content-Type", "text/html; charset=utf-8");
+  return new Response(body, { status, headers });
+};
+
+async function authorize(request: Request, env: Env): Promise<Response> {
+  const oauth = env.OAUTH_PROVIDER;
+  if (request.method === "GET") {
+    let auth: AuthRequest;
+    try {
+      auth = await oauth.parseAuthRequest(request);
+    } catch {
+      return new Response("Ungültige Anmeldeanfrage.", { status: 400 });
+    }
+    if (!ALLOWED_REDIRECTS.has(auth.redirectUri)) return new Response("Nicht erlaubt.", { status: 400 });
+    const consent = await oauth.beginConsent(auth);
+    return html(page(consent.handle, new URL(auth.redirectUri).host), consent.headers);
+  }
+
+  // Each try costs a DocuWare login, and DocuWare locks accounts after repeated failures.
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (!(await env.LOGIN_LIMIT.limit({ key: ip })).success)
+    return new Response("Zu viele Anmeldeversuche. Bitte eine Minute warten.", { status: 429 });
+
+  const form = await request.formData();
+  const handle = String(form.get("handle") ?? "");
+  const username = String(form.get("username") ?? "").trim();
+  const password = String(form.get("password") ?? "");
+  try {
+    // Check the password against DocuWare before using up the one-time consent handle.
+    const { token } = await login(base(env), { username, password });
+    const approved = await oauth.approveConsent(request, handle);
+    const { redirectTo } = await oauth.completeAuthorization({
+      request: approved.request,
+      userId: username.toLowerCase(),
+      metadata: { username },
+      scope: approved.request.scope,
+      props: { username, password, dwToken: token } satisfies Props,
+    });
+    console.log(`login ok: ${username}`);
+    approved.headers.set("Location", redirectTo);
+    return new Response(null, { status: 302, headers: approved.headers });
+  } catch (e) {
+    if (!(e instanceof DocuWareError)) {
+      console.error(e);
+      return new Response("Die Anmeldung ist abgelaufen. Bitte in Claude erneut auf Verbinden klicken.", { status: 400 });
+    }
+    await new Promise((r) => setTimeout(r, 1000)); // slows password guessing
+    const headers = new Headers({ "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'", "Cache-Control": "no-store" });
+    return html(page(handle, "claude.ai", e.message, username), headers, 401);
+  }
+}
+
+const mcp = {
+  fetch(request: Request, env: Env, ctx: ExecutionContext & { props: Props }) {
+    return createMcpHandler(() => buildServer(base(env), ctx.props))(request, env, ctx);
+  },
+};
+
+export default new OAuthProvider<Env>({
+  apiRoute: "/mcp",
+  apiHandler: mcp as any,
+  defaultHandler: {
+    fetch(request: Request, env: Env) {
+      if (new URL(request.url).pathname === "/authorize") return authorize(request, env);
+      return new Response("DocuWare MCP. In Claude als Connector hinzufügen: <diese Adresse>/mcp", { status: 404 });
+    },
+  } as any,
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+  resourceMetadata: { resource: `${(globalEnv as unknown as Env).PUBLIC_URL.replace(/\/+$/, "")}/mcp` },
+  clientRegistrationCallback: ({ clientMetadata }) => {
+    const uris = (clientMetadata.redirect_uris as unknown[]) ?? [];
+    if (!uris.length || !uris.every((u) => typeof u === "string" && ALLOWED_REDIRECTS.has(u)))
+      return { code: "invalid_redirect_uri", description: "Only Claude may connect to this server." };
+  },
+  // Every refresh signs in to DocuWare again: a fresh DocuWare token, and a user who was
+  // disabled or changed their password loses access within the hour.
+  tokenExchangeCallback: async ({ grantType, props, env }) => {
+    if (grantType !== "refresh_token") return;
+    const p = props as Props;
+    let fresh;
+    try {
+      fresh = await login(base(env as Env), p);
+    } catch (e) {
+      // Wrong password now: end this sign-in for good. DocuWare down: just fail this refresh.
+      const gone = e instanceof DocuWareError && e.status === 401;
+      throw new OAuthError(gone ? "invalid_grant" : "temporarily_unavailable", { description: "DocuWare sign-in failed" });
+    }
+    const { token, expiresIn } = fresh;
+    return { accessTokenProps: { ...p, dwToken: token }, newProps: { ...p, dwToken: undefined }, accessTokenTTL: Math.min(expiresIn, 3600) };
+  },
+});
